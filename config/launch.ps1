@@ -16,6 +16,20 @@ $VenvActivate = Join-Path $BackendDir ".venv\Scripts\Activate.ps1"
 # Refresh PATH to pick up Ollama
 $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
 
+# Load .env file
+$envFile = Join-Path $PSScriptRoot ".env"
+if (Test-Path $envFile) {
+    Write-Host "=== Loading .env ===" -ForegroundColor Cyan
+    Get-Content $envFile | ForEach-Object {
+        if ($_ -match '^\s*([^#][^=]+?)\s*=\s*(.+?)\s*$') {
+            [System.Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], "Process")
+            Write-Host "  $($Matches[1]) = $($Matches[2])" -ForegroundColor Gray
+        }
+    }
+} else {
+    Write-Host "WARNING: config/.env not found. Copy from .env.example" -ForegroundColor Red
+}
+
 # --- Ollama ---
 Write-Host "=== Checking Ollama ===" -ForegroundColor Cyan
 $ollamaRunning = $false
