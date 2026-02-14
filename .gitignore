@@ -1,0 +1,42 @@
+# Plan files
+*.prompt.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+
+# Node
+node_modules/
+.next/
+.svelte-kit/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Data (will be gitignored, backed up separately)
+data/
+*.db
+chroma/
+
+# Environment
+.env
+.env.local
+.env.*.local
