@@ -1,5 +1,6 @@
 # Plan files
 *.prompt.md
+*.prompt.plan
 
 # Python
 __pycache__/
