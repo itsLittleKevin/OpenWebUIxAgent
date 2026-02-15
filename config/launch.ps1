@@ -1,10 +1,18 @@
-<# 
+<#
   OpenWebUIxAgent - Launch Script
-  Starts all required services for the agent system.
+  Starts: Ollama -> Backend (FastAPI) -> Frontend (SvelteKit) + GPT-SoVITS (TTS)
+  All services run in dedicated windows with unified terminal output for easy monitoring.
+
+  Usage:
+    .\config\launch.ps1                           # Start everything
+    .\config\launch.ps1 -Stop                    # Kill all services
+    .\config\launch.ps1 -BackendOnly # Only Ollama + Backend
+    .\config\launch.ps1 -FrontendOnly # Only Frontend (assumes backend running)
 #>
 param(
     [switch]$BackendOnly,
-    [switch]$FrontendOnly
+    [switch]$FrontendOnly,
+    [switch]$Stop
 )
 
 $ErrorActionPreference = "Continue"
@@ -12,98 +20,345 @@ $ProjectRoot = $PSScriptRoot | Split-Path -Parent
 $OpenWebUIDir = Join-Path $ProjectRoot "open-webui"
 $BackendDir = Join-Path $OpenWebUIDir "backend"
 $VenvActivate = Join-Path $BackendDir ".venv\Scripts\Activate.ps1"
+$EnvFile = Join-Path $PSScriptRoot ".env"
 
-# Refresh PATH to pick up Ollama
-$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+# Window titles used to track spawned processes
+$TitleBackend      = "OpenWebUIxAgent-Backend"
+$TitleFrontend     = "OpenWebUIxAgent-Frontend"
+$TitleGPTSoVITS    = "OpenWebUIxAgent-GPT-SoVITS"
 
-# Load .env file
-$envFile = Join-Path $PSScriptRoot ".env"
-if (Test-Path $envFile) {
+# ── Helper: Force-kill processes and release ports ───────────
+function Cleanup-Ports {
+    param(
+        [array]$Ports = @(11434, 8080, 5173, 5174, 9880, 8765),
+        [bool]$Verbose = $true
+    )
+    
+    $killed = 0
+    foreach ($port in $Ports) {
+        $process = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+        if ($process) {
+            try {
+                Stop-Process -Id $process.OwningProcess -Force -ErrorAction SilentlyContinue
+                if ($Verbose) { Write-Host "  Killed process on port $port (PID: $($process.OwningProcess))" -ForegroundColor Gray }
+                $killed++
+            } catch { }
+        }
+    }
+    
+    # Kill service windows by title
+    Get-Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.MainWindowTitle -in @($TitleBackend, $TitleFrontend, $TitleGPTSoVITS)
+    } | ForEach-Object {
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+        if ($Verbose) { Write-Host "  Killed window: $($_.MainWindowTitle)" -ForegroundColor Gray }
+        $killed++
+    }
+    
+    # Kill all Ollama processes (main + runner children)
+    Get-Process -Name "ollama*" -ErrorAction SilentlyContinue | ForEach-Object {
+        Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+        if ($Verbose) { Write-Host "  Killed Ollama process: $($_.ProcessName) (PID $($_.Id))" -ForegroundColor Gray }
+        $killed++
+    }
+    
+    if ($killed -gt 0) {
+        Write-Host "  Waiting for port release (TIME_WAIT)..." -ForegroundColor Gray
+        Start-Sleep -Seconds 3
+    }
+    
+    return $killed
+}
+
+# ── Stop mode ──────────────────────────────────────────────
+if ($Stop) {
+    Write-Host "Stopping services..." -ForegroundColor Yellow
+    $count = Cleanup-Ports
+    if ($count -eq 0) {
+        Write-Host "  No services running." -ForegroundColor Gray
+    } else {
+        Write-Host "  Stopped $count process(es)" -ForegroundColor Green
+    }
+    Write-Host "Done." -ForegroundColor Green
+    return
+}
+
+# ── Refresh PATH ───────────────────────────────────────────
+$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" +
+            [System.Environment]::GetEnvironmentVariable("Path","User")
+
+# ── Load .env ──────────────────────────────────────────────
+$envVars = @{}
+if (Test-Path $EnvFile) {
     Write-Host "=== Loading .env ===" -ForegroundColor Cyan
-    Get-Content $envFile | ForEach-Object {
+    Get-Content $EnvFile | ForEach-Object {
         if ($_ -match '^\s*([^#][^=]+?)\s*=\s*(.+?)\s*$') {
-            [System.Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], "Process")
-            Write-Host "  $($Matches[1]) = $($Matches[2])" -ForegroundColor Gray
+            $key = $Matches[1].Trim()
+            $val = $Matches[2].Trim()
+            [System.Environment]::SetEnvironmentVariable($key, $val, "Process")
+            $envVars[$key] = $val
+            Write-Host "  $key = $val" -ForegroundColor Gray
         }
     }
 } else {
-    Write-Host "WARNING: config/.env not found. Copy from .env.example" -ForegroundColor Red
+    Write-Host "WARNING: config/.env not found — copy from .env.example" -ForegroundColor Red
 }
 
-# --- Ollama ---
-Write-Host "=== Checking Ollama ===" -ForegroundColor Cyan
-$ollamaRunning = $false
-try {
-    $health = Invoke-RestMethod -Uri "http://localhost:11434" -Method Get -ErrorAction Stop
-    $ollamaRunning = $true
-    Write-Host "  Ollama is already running" -ForegroundColor Green
-} catch {
-    Write-Host "  Starting Ollama..." -ForegroundColor Yellow
-    Start-Process -FilePath "ollama" -ArgumentList "serve" -WindowStyle Hidden
-    Start-Sleep -Seconds 3
+# ── Helper: build env export string for sub-shells ─────────
+function Get-EnvExportBlock {
+    $lines = @()
+    foreach ($kv in $envVars.GetEnumerator()) {
+        $lines += "`$env:$($kv.Key) = '$($kv.Value)'"
+    }
+    return ($lines -join "; ")
+}
+
+# ── Prerequisites check ───────────────────────────────────
+function Test-Prerequisites {
+    $ok = $true
+    if (-not (Test-Path $VenvActivate)) {
+        Write-Host "  ERROR: Python venv not found at $BackendDir\.venv" -ForegroundColor Red
+        Write-Host "         Run: cd open-webui/backend; py -3.11 -m venv .venv; .venv\Scripts\Activate.ps1; pip install -r requirements.txt" -ForegroundColor Yellow
+        $ok = $false
+    }
+    if (-not (Test-Path (Join-Path $OpenWebUIDir "node_modules"))) {
+        Write-Host "  ERROR: node_modules not found" -ForegroundColor Red
+        Write-Host "         Run: cd open-webui; npm install --legacy-peer-deps" -ForegroundColor Yellow
+        $ok = $false
+    }
+    if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+        Write-Host "  ERROR: Node.js not found in PATH" -ForegroundColor Red
+        $ok = $false
+    }
+    return $ok
+}
+
+Write-Host "=== Checking Prerequisites ===" -ForegroundColor Cyan
+if (-not (Test-Prerequisites)) {
+    Write-Host "`nFix the above errors and try again." -ForegroundColor Red
+    return
+}
+Write-Host "  All prerequisites OK" -ForegroundColor Green
+
+# ── Cleanup any stale processes ────────────────────────────
+Write-Host "`n=== Cleaning up stale processes ===" -ForegroundColor Cyan
+$cleaned = Cleanup-Ports -Verbose $false
+if ($cleaned -gt 0) {
+    Write-Host "  Cleaned up $cleaned stale process(es)" -ForegroundColor Green
+} else {
+    Write-Host "  No stale processes found" -ForegroundColor Green
+}
+
+# ── Ollama ─────────────────────────────────────────────────
+if (-not $FrontendOnly) {
+    Write-Host "`n=== Checking Ollama ===" -ForegroundColor Cyan
     try {
-        Invoke-RestMethod -Uri "http://localhost:11434" -Method Get -ErrorAction Stop | Out-Null
-        Write-Host "  Ollama started" -ForegroundColor Green
+        Invoke-RestMethod -Uri "http://localhost:11434" -Method Get -TimeoutSec 3 -ErrorAction Stop | Out-Null
+        Write-Host "  Ollama already running" -ForegroundColor Green
     } catch {
-        Write-Host "  WARNING: Ollama failed to start. Is it installed?" -ForegroundColor Red
+        Write-Host "  Starting Ollama..." -ForegroundColor Yellow
+        $ollamaPath = (Get-Command ollama -ErrorAction SilentlyContinue).Source
+        if (-not $ollamaPath) {
+            $ollamaPath = "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe"
+        }
+        if (Test-Path $ollamaPath) {
+            # Set OLLAMA_KEEP_ALIVE so models unload from VRAM after idle timeout
+            if ($envVars.ContainsKey("OLLAMA_KEEP_ALIVE")) {
+                [System.Environment]::SetEnvironmentVariable("OLLAMA_KEEP_ALIVE", $envVars["OLLAMA_KEEP_ALIVE"], "Process")
+            }
+            Start-Process -FilePath $ollamaPath -ArgumentList "serve" -WindowStyle Hidden
+            # Wait for Ollama to be ready
+            $retries = 0
+            while ($retries -lt 10) {
+                Start-Sleep -Seconds 2
+                try {
+                    Invoke-RestMethod -Uri "http://localhost:11434" -Method Get -TimeoutSec 2 -ErrorAction Stop | Out-Null
+                    Write-Host "  Ollama started" -ForegroundColor Green
+                    break
+                } catch { $retries++ }
+            }
+            if ($retries -ge 10) {
+                Write-Host "  WARNING: Ollama didn't respond after 20s" -ForegroundColor Red
+            }
+        } else {
+            Write-Host "  WARNING: Ollama not found. Install: winget install Ollama.Ollama" -ForegroundColor Red
+        }
+    }
+
+    # Check models
+    try {
+        $models = (Invoke-RestMethod -Uri "http://localhost:11434/api/tags" -Method Get -TimeoutSec 5).models
+        if ($models.Count -eq 0) {
+            Write-Host "  No models found. Run: ollama pull huihui_ai/qwen3-abliterated:4b-v2" -ForegroundColor Yellow
+        } else {
+            Write-Host "  Models: $($models.name -join ', ')" -ForegroundColor Green
+        }
+    } catch {
+        Write-Host "  Could not query models" -ForegroundColor Yellow
     }
 }
 
-# Check for models
-$models = (Invoke-RestMethod -Uri "http://localhost:11434/api/tags" -Method Get).models
-if ($models.Count -eq 0) {
-    Write-Host "  No models found. Pulling qwen2.5:7b..." -ForegroundColor Yellow
-    & ollama pull qwen2.5:7b
-} else {
-    Write-Host "  Models available: $($models.name -join ', ')" -ForegroundColor Green
-}
-
-if ($FrontendOnly) { goto frontend }
-
-# --- Backend ---
+# ── Backend ────────────────────────────────────────────────
 if (-not $FrontendOnly) {
-    Write-Host "`n=== Starting Open WebUI Backend (port 8080) ===" -ForegroundColor Cyan
-    $backendJob = Start-Job -ScriptBlock {
-        param($BackendDir, $VenvActivate)
-        Set-Location $BackendDir
-        & $VenvActivate
-        $env:CORS_ALLOW_ORIGIN = "http://localhost:5173;http://localhost:8080"
-        python -m uvicorn open_webui.main:app --port 8080 --host 0.0.0.0 --forwarded-allow-ips="*" --reload
-    } -ArgumentList $BackendDir, $VenvActivate
-    Write-Host "  Backend starting (Job ID: $($backendJob.Id))..." -ForegroundColor Green
+    Write-Host "`n=== Starting Backend (port 8080) ===" -ForegroundColor Cyan
+
+    # Kill existing backend window if any
+    Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -eq $TitleBackend } |
+        ForEach-Object { Stop-Process -Id $_.Id -Force }
+
+    $envBlock = Get-EnvExportBlock
+    $backendCmd = @"
+`$Host.UI.RawUI.WindowTitle = '$TitleBackend';
+Set-Location '$BackendDir';
+& '$VenvActivate';
+$envBlock;
+`$env:CORS_ALLOW_ORIGIN = 'http://localhost:5173;http://localhost:8080';
+Write-Host 'Backend starting on http://localhost:8080 ...' -ForegroundColor Green;
+python -m uvicorn open_webui.main:app --port 8080 --host 0.0.0.0 --forwarded-allow-ips='*' --reload --reload-exclude data;
+Write-Host 'Backend exited. Press any key...' -ForegroundColor Red; `$null = `$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+"@
+
+    Start-Process powershell -ArgumentList "-NoExit", "-Command", $backendCmd
+    Write-Host "  Backend window opened" -ForegroundColor Green
 }
 
-# --- Frontend ---
+# ── Frontend ───────────────────────────────────────────────
 if (-not $BackendOnly) {
-    Write-Host "`n=== Starting Open WebUI Frontend (port 5173) ===" -ForegroundColor Cyan
-    $frontendJob = Start-Job -ScriptBlock {
-        param($OpenWebUIDir)
-        Set-Location $OpenWebUIDir
-        npm run dev
-    } -ArgumentList $OpenWebUIDir
-    Write-Host "  Frontend starting (Job ID: $($frontendJob.Id))..." -ForegroundColor Green
+    Write-Host "`n=== Starting Frontend (port 5173) ===" -ForegroundColor Cyan
+
+    # Kill existing frontend window if any
+    Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -eq $TitleFrontend } |
+        ForEach-Object { Stop-Process -Id $_.Id -Force }
+
+    $frontendCmd = @"
+`$Host.UI.RawUI.WindowTitle = '$TitleFrontend';
+Set-Location '$OpenWebUIDir';
+Write-Host 'Frontend starting on http://localhost:5173 ...' -ForegroundColor Green;
+npm run dev;
+Write-Host 'Frontend exited. Press any key...' -ForegroundColor Red; `$null = `$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+"@
+
+    Start-Process powershell -ArgumentList "-NoExit", "-Command", $frontendCmd
+    Write-Host "  Frontend window opened" -ForegroundColor Green
 }
 
-# --- Wait ---
-Write-Host "`n=== Services ===" -ForegroundColor Cyan
-Write-Host "  Ollama:   http://localhost:11434" -ForegroundColor White
-Write-Host "  Backend:  http://localhost:8080" -ForegroundColor White
-Write-Host "  Frontend: http://localhost:5173" -ForegroundColor White
-Write-Host "`nPress Ctrl+C to stop all services." -ForegroundColor Yellow
+# ── Wait for services ─────────────────────────────────────
+Write-Host "`n=== Waiting for services... ===" -ForegroundColor Cyan
+
+if (-not $FrontendOnly) {
+    $retries = 0
+    while ($retries -lt 30) {
+        Start-Sleep -Seconds 2
+        try {
+            Invoke-RestMethod -Uri "http://localhost:8080/health" -Method Get -TimeoutSec 3 -ErrorAction Stop | Out-Null
+            Write-Host "  Backend ready" -ForegroundColor Green
+            break
+        } catch { $retries++ }
+    }
+    if ($retries -ge 30) {
+        Write-Host "  Backend not responding yet — check the Backend window for errors" -ForegroundColor Yellow
+    }
+}
+
+if (-not $BackendOnly) {
+    $retries = 0
+    while ($retries -lt 20) {
+        Start-Sleep -Seconds 2
+        try {
+            Invoke-WebRequest -Uri "http://localhost:5173" -Method Head -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop | Out-Null
+            Write-Host "  Frontend ready" -ForegroundColor Green
+            break
+        } catch { $retries++ }
+    }
+    if ($retries -ge 20) {
+        Write-Host "  Frontend not responding yet — check the Frontend window for errors" -ForegroundColor Yellow
+    }
+}
+
+# ── GPT-SoVITS (TTS Engine) ───────────────────────────
+Write-Host "`n=== Starting GPT-SoVITS (port 9880) ===" -ForegroundColor Cyan
+
+# Kill existing GPT-SoVITS window if any
+Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -eq $TitleGPTSoVITS } |
+    ForEach-Object { Stop-Process -Id $_.Id -Force }
+    
+$GPTSoVITSDir = Join-Path $ProjectRoot "vendor\gpt-sovits"
+$VenvActivateTTS = Join-Path $GPTSoVITSDir "venv_tts\Scripts\Activate.ps1"
+
+if (Test-Path $VenvActivateTTS) {
+    $envBlock = Get-EnvExportBlock
+    $refAudioPath = Join-Path $GPTSoVITSDir "reference_audio\default_reference.wav"
+    $refTextPath = Join-Path $GPTSoVITSDir "reference_audio\default_reference.txt"
+    
+    # Write a temporary launcher script with UTF-8 BOM encoding
+    # (passing Chinese text via Start-Process -Command corrupts encoding)
+    $tempScript = Join-Path $env:TEMP "gpt-sovits-launch-temp.ps1"
+    
+    $sovitsScript = @"
+`$Host.UI.RawUI.WindowTitle = '$TitleGPTSoVITS'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::InputEncoding = [System.Text.Encoding]::UTF8
+`$env:PYTHONIOENCODING = 'utf-8'
+Set-Location '$GPTSoVITSDir'
+& '$VenvActivateTTS'
+$envBlock
+
+# Read reference text directly with UTF-8 encoding at runtime
+`$refText = 'hello'
+if (Test-Path '$refTextPath') {
+    `$refText = [System.IO.File]::ReadAllText('$refTextPath', [System.Text.Encoding]::UTF8).Trim()
+}
+
+Write-Host 'GPT-SoVITS starting on http://localhost:9880 ...' -ForegroundColor Green
+Write-Host 'API endpoint: http://localhost:9880/tts (v2 streaming)' -ForegroundColor Green
+python api_v2.py -a 0.0.0.0 -p 9880
+Write-Host 'GPT-SoVITS exited. Press any key...' -ForegroundColor Red
+`$null = `$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+"@
+    
+    [System.IO.File]::WriteAllText($tempScript, $sovitsScript, [System.Text.UTF8Encoding]::new($true))
+    
+    Start-Process powershell -ArgumentList "-NoExit", "-File", $tempScript
+    Write-Host "  GPT-SoVITS window opened" -ForegroundColor Green
+} else {
+    Write-Host "  ERROR: GPT-SoVITS venv not found at $VenvActivateTTS" -ForegroundColor Red
+}
+
+# ── Audio Router (for VMC lip sync) ────────────────────────
+Write-Host "`n=== Starting Audio Router (port 8765) ===" -ForegroundColor Cyan
+
+# Kill existing Audio Router window if any
+Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -eq "OpenWebUIxAgent-AudioRouter" } |
+    ForEach-Object { Stop-Process -Id $_.Id -Force }
+
+$ServicesDir = Join-Path $ProjectRoot "services"
+
+$routerCmd = @"
+`$Host.UI.RawUI.WindowTitle = 'OpenWebUIxAgent-AudioRouter';
+Set-Location '$ServicesDir';
+Write-Host 'Audio Router starting on http://localhost:8765 (VMC lip sync)...' -ForegroundColor Green;
+python audio_router.py --serve --port 8765 --vmc-port 39540;
+Write-Host 'Audio Router exited. Press any key...' -ForegroundColor Red; `$null = `$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+"@
+
+Start-Process powershell -ArgumentList "-NoExit", "-Command", $routerCmd
+Write-Host "  Audio Router window opened (VMC lip sync enabled)" -ForegroundColor Green
+
+# ── Summary ────────────────────────────────────────────────
+Write-Host "`n========================================" -ForegroundColor Cyan
+Write-Host "  Ollama:      http://localhost:11434" -ForegroundColor White
+Write-Host "  Backend:     http://localhost:8080" -ForegroundColor White
+Write-Host "  Frontend:    http://localhost:5173" -ForegroundColor White
+Write-Host "  GPT-SoVITS:  http://localhost:9880" -ForegroundColor White
+Write-Host "  AudioRouter: http://localhost:8765 (VMC lip sync)" -ForegroundColor White
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Services running in dedicated windows for clear logging:" -ForegroundColor Gray
+Write-Host "  • Backend:     API server and audio processing" -ForegroundColor Gray
+Write-Host "  • Frontend:    Web UI" -ForegroundColor Gray
+Write-Host "  • GPT-SoVITS:  Voice synthesis" -ForegroundColor Gray
+Write-Host "  • AudioRouter: VMC/OSC lip sync for VRM" -ForegroundColor Gray
+Write-Host ""
+Write-Host "To stop all: .\config\launch.ps1 -Stop" -ForegroundColor Gray
 Write-Host "First time? Open http://localhost:5173 and create an admin account." -ForegroundColor Yellow
 
-try {
-    while ($true) {
-        Start-Sleep -Seconds 5
-        # Check job health
-        $jobs = Get-Job | Where-Object { $_.State -eq "Failed" }
-        foreach ($j in $jobs) {
-            Write-Host "  WARNING: Job $($j.Name) failed!" -ForegroundColor Red
-            Receive-Job $j
-        }
-    }
-} finally {
-    Write-Host "`nStopping services..." -ForegroundColor Yellow
-    Get-Job | Stop-Job
-    Get-Job | Remove-Job
-}

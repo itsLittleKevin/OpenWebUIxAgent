@@ -35,7 +35,7 @@ cd OpenWebUIxAgent
 
 # Install Ollama (if not already installed)
 winget install Ollama.Ollama
-ollama pull qwen2.5:7b
+ollama pull huihui_ai/qwen3-abliterated:4b-v2
 
 # Frontend setup
 cd open-webui
