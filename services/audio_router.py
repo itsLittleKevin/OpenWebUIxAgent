@@ -63,33 +63,55 @@ log = logging.getLogger(__name__)
 
 
 class VMCLipSync:
-    """Sends lip sync blend shapes to VSeeFace via VMC protocol (OSC/UDP)."""
+    """Sends lip sync blend shapes to VSeeFace via VMC protocol (OSC/UDP).
 
-    # VRM blend shape names for mouth vowels
+    Uses an envelope-follower approach: the mouth opens quickly on audio
+    energy but *closes slowly*, preventing the rapid open-close flutter
+    that raw RMS tracking causes.  Vowel shapes rotate smoothly over
+    time while the mouth is open, giving natural-looking articulation.
+    """
+
     VOWELS = ['A', 'I', 'U', 'E', 'O']
     FPS = 30  # Send rate
 
     def __init__(self, host: str = '127.0.0.1', port: int = 39540,
-                 gain: float = 4.0, max_open: float = 0.55,
-                 smoothing: float = 0.35):
+                 gain: float = 6.0, max_open: float = 0.65,
+                 attack: float = 0.55, release: float = 0.75,
+                 vowel_speed: float = 3.5):
         """
         Args:
             host/port: VMC/OSC target (VSeeFace).
-            gain: Amplitude multiplier (lower = subtler mouth). Default 4.0.
-            max_open: Hard cap on mouth-open value (0-1). Default 0.55.
-            smoothing: Exponential smoothing factor (0=no smoothing, 1=frozen).
-                       Default 0.35 — blends ~65% new + 35% previous frame.
+            gain: Amplitude multiplier. Default 6.0.
+            max_open: Hard cap on mouth-open value (0-1). Default 0.65.
+            attack: Envelope attack factor (0-1). Higher = mouth opens faster.
+                    Default 0.55 — mouth opens responsively within a few frames.
+            release: Envelope release factor (0-1). Higher = mouth closes slower.
+                     Default 0.75 — mouth holds open, fading gradually.
+            vowel_speed: How quickly to cycle through vowel shapes (Hz).
+                         Default 3.5 — a few vowel changes per second.
         """
         self.host = host
         self.port = port
         self.gain = gain
         self.max_open = max_open
-        self.smoothing = smoothing
+        self.attack = attack
+        self.release = release
+        self.vowel_speed = vowel_speed
         self.client: Optional[SimpleUDPClient] = None
+
+        # Internal state
+        self._envelope = 0.0        # current envelope level (slow-release)
+        self._vowel_phase = 0.0     # phase for cycling vowel shapes
+        self._frame_count = 0       # count frames for time-based effects
+        # Previous blend shape values for interpolation
+        self._prev_shapes: dict[str, float] = {v: 0.0 for v in self.VOWELS}
+
         if HAS_OSC:
             self.client = SimpleUDPClient(host, port)
             log.info(f"VMC lip sync sender -> {host}:{port} "
-                     f"(gain={gain}, max={max_open}, smooth={smoothing})")
+                     f"(gain={gain}, max={max_open}, "
+                     f"attack={attack}, release={release}, "
+                     f"vowel_speed={vowel_speed})")
         else:
             log.warning("python-osc not available, VMC lip sync disabled")
 
@@ -101,10 +123,79 @@ class VMCLipSync:
             self.client.send_message("/VMC/Ext/Blend/Val", [name, float(val)])
         self.client.send_message("/VMC/Ext/Blend/Apply", [])
 
+    def rms_to_blend_shapes(self, rms: float, _prev_open: float = 0.0) -> float:
+        """Convert RMS amplitude to smooth VMC blend shapes.
+
+        Uses an envelope follower with fast attack / slow release so the
+        mouth opens quickly but never snaps shut between syllables.
+        Vowel shapes rotate smoothly over time while the envelope is above
+        the speaking threshold.
+
+        Returns the current envelope value (pass back as prev_open for compat).
+        """
+        import math
+
+        target = min(self.max_open, rms * self.gain)
+
+        # Asymmetric envelope: fast attack, slow release
+        if target > self._envelope:
+            # Opening — blend toward new target quickly
+            self._envelope += (target - self._envelope) * self.attack
+        else:
+            # Closing — decay slowly so mouth doesn't snap shut
+            self._envelope += (target - self._envelope) * (1.0 - self.release)
+
+        # Clamp
+        envelope = max(0.0, min(self.max_open, self._envelope))
+
+        # Speaking threshold — below this, mouth is closed
+        if envelope < 0.02:
+            envelope = 0.0
+            self._vowel_phase = 0.0
+            target_shapes = {v: 0.0 for v in self.VOWELS}
+        else:
+            # Advance vowel phase (time-based, not amplitude-based)
+            self._vowel_phase += self.vowel_speed / self.FPS
+
+            # Use sine waves at different phases to create smooth vowel blending
+            phase = self._vowel_phase
+            # Each vowel gets a sine wave offset by a different amount
+            raw_a = max(0.0, math.sin(phase * 2.0 * math.pi))
+            raw_e = max(0.0, math.sin(phase * 2.0 * math.pi + 1.2))
+            raw_i = max(0.0, math.sin(phase * 2.0 * math.pi + 2.5))
+            raw_o = max(0.0, math.sin(phase * 2.0 * math.pi + 3.8))
+            raw_u = max(0.0, math.sin(phase * 2.0 * math.pi + 5.0))
+
+            # Normalize so the dominant vowel gets most of the envelope
+            total = raw_a + raw_e + raw_i + raw_o + raw_u
+            if total < 0.01:
+                total = 1.0
+
+            target_shapes = {
+                'A': (raw_a / total) * envelope,
+                'E': (raw_e / total) * envelope * 0.85,
+                'I': (raw_i / total) * envelope * 0.7,
+                'O': (raw_o / total) * envelope * 0.9,
+                'U': (raw_u / total) * envelope * 0.75,
+            }
+
+        # Smooth interpolation of individual blend shapes (prevents jumps)
+        shape_lerp = 0.35
+        smoothed = {}
+        for v in self.VOWELS:
+            smoothed[v] = self._prev_shapes[v] + (target_shapes[v] - self._prev_shapes[v]) * shape_lerp
+            # Snap to zero if very small
+            if smoothed[v] < 0.005:
+                smoothed[v] = 0.0
+
+        self._prev_shapes = smoothed
+        self._send_blend_shapes(smoothed)
+        self._frame_count += 1
+        return envelope
+
     def send_lip_sync(self, samples: np.ndarray, sample_rate: int):
-        """Legacy: pre-analyze entire buffer. Prefer rms_to_blend_shapes() with callback mode."""
+        """Pre-analyze entire buffer and send lip sync frame by frame."""
         import time
-        import random
 
         if samples.ndim == 2:
             mono = samples.mean(axis=1)
@@ -117,80 +208,39 @@ class VMCLipSync:
 
         log.info(f"VMC lip sync: {total_frames} frames at {self.FPS} fps")
         start_time = time.perf_counter()
-        prev_open = 0.0
 
         for i in range(total_frames):
             target_time = start_time + i * frame_dur
             chunk = mono[i * chunk_size : (i + 1) * chunk_size]
             rms = float(np.sqrt(np.mean(chunk ** 2)))
-            prev_open = self.rms_to_blend_shapes(rms, prev_open)
+            self.rms_to_blend_shapes(rms)
 
             now = time.perf_counter()
             sleep_time = target_time + frame_dur - now
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
-        self._fade_close(prev_open)
+        self._fade_close()
 
-    def rms_to_blend_shapes(self, rms: float, prev_open: float) -> float:
-        """Convert an RMS amplitude value to VMC blend shapes and send them.
-
-        Returns the current mouth_open value (pass back as prev_open next call).
-        """
-        import random
-
-        mouth_open = min(self.max_open, rms * self.gain)
-
-        # Deadzone
-        if mouth_open < 0.03:
-            mouth_open = 0.0
-
-        # Exponential smoothing
-        mouth_open = (1.0 - self.smoothing) * mouth_open + self.smoothing * prev_open
-
-        # Subtle random variation
-        if mouth_open > 0.03:
-            mouth_open = min(self.max_open, mouth_open * random.uniform(0.90, 1.10))
-
-        # Map amplitude to vowel shapes
-        a_val = e_val = i_val = o_val = u_val = 0.0
-
-        if mouth_open < 0.03:
-            pass
-        elif mouth_open < 0.15:
-            i_val = mouth_open * 0.5
-            e_val = mouth_open * 0.3
-        elif mouth_open < 0.25:
-            e_val = mouth_open * 0.6
-            i_val = mouth_open * 0.3
-        elif mouth_open < 0.35:
-            a_val = mouth_open * 0.6
-            e_val = mouth_open * 0.2
-        elif mouth_open < 0.45:
-            a_val = mouth_open * 0.7
-            o_val = mouth_open * 0.2
-        else:
-            a_val = mouth_open * 0.85
-            o_val = mouth_open * 0.3
-
-        self._send_blend_shapes({
-            'A': a_val, 'E': e_val, 'I': i_val, 'O': o_val, 'U': u_val,
-        })
-        return mouth_open
-
-    def _fade_close(self, prev_open: float):
-        """Gradually close the mouth over a few frames."""
+    def _fade_close(self, _prev_open: float = 0.0):
+        """Gradually close the mouth over several frames."""
         import time
         frame_dur = 1.0 / self.FPS
-        for step in range(4):
-            fade = 1.0 - (step + 1) / 4.0
-            self._send_blend_shapes({v: prev_open * fade * 0.5 for v in self.VOWELS})
+        for step in range(8):
+            fade = 1.0 - (step + 1) / 8.0
+            shapes = {v: self._prev_shapes.get(v, 0.0) * fade for v in self.VOWELS}
+            self._prev_shapes = shapes
+            self._send_blend_shapes(shapes)
             time.sleep(frame_dur)
         self._send_blend_shapes({v: 0.0 for v in self.VOWELS})
+        self._prev_shapes = {v: 0.0 for v in self.VOWELS}
+        self._envelope = 0.0
 
     def close_mouth(self):
         """Reset all mouth blend shapes to 0."""
         self._send_blend_shapes({v: 0.0 for v in self.VOWELS})
+        self._prev_shapes = {v: 0.0 for v in self.VOWELS}
+        self._envelope = 0.0
 
 
 class AudioRouter:
@@ -199,9 +249,8 @@ class AudioRouter:
     def __init__(self, speaker_device_name: Optional[str] = None,
                  sample_rate: int = 24000,
                  vmc_port: int = 39540,
-                 lip_gain: float = 4.0,
-                 lip_max: float = 0.55,
-                 lip_smooth: float = 0.35):
+                 lip_gain: float = 6.0,
+                 lip_max: float = 0.65):
         """
         Initialize audio router.
         
@@ -209,14 +258,13 @@ class AudioRouter:
             speaker_device_name: Name of speaker device (auto-detect if None)
             sample_rate: Audio sample rate in Hz
             vmc_port: VMC/OSC port for VSeeFace lip sync (default 39540)
-            lip_gain: Amplitude gain for lip sync (default 4.0)
-            lip_max: Maximum mouth openness 0-1 (default 0.55)
-            lip_smooth: Smoothing factor 0-1 (default 0.35)
+            lip_gain: Amplitude gain for lip sync (default 6.0)
+            lip_max: Maximum mouth openness 0-1 (default 0.65)
         """
         self.sample_rate = sample_rate
         self.speaker_device_id = None
         self.vmc = VMCLipSync(port=vmc_port, gain=lip_gain,
-                              max_open=lip_max, smoothing=lip_smooth)
+                              max_open=lip_max)
         
         if HAS_SOUNDDEVICE:
             self._detect_devices(speaker_device_name)
@@ -404,15 +452,13 @@ class AudioRouter:
 
             def vmc_worker():
                 """Poll current_rms at ~30 fps and send VMC blend shapes."""
-                import time
-                prev_open = 0.0
                 interval = 1.0 / self.vmc.FPS
                 while not playback_done.is_set():
                     rms = current_rms[0]
-                    prev_open = self.vmc.rms_to_blend_shapes(rms, prev_open)
+                    self.vmc.rms_to_blend_shapes(rms)
                     playback_done.wait(timeout=interval)
                 # Fade mouth closed
-                self.vmc._fade_close(prev_open)
+                self.vmc._fade_close()
                 log.info("VMC lip sync complete")
 
             # Start VMC thread
@@ -600,12 +646,10 @@ def main():
                        help='Test tone duration in seconds (default: 2)')
     parser.add_argument('--vmc-port', type=int, default=39540,
                        help='VMC/OSC port for VSeeFace lip sync (default: 39540)')
-    parser.add_argument('--lip-gain', type=float, default=4.0,
-                       help='Lip sync amplitude gain (default: 4.0, lower=subtler)')
-    parser.add_argument('--lip-max', type=float, default=0.55,
-                       help='Max mouth openness 0-1 (default: 0.55)')
-    parser.add_argument('--lip-smooth', type=float, default=0.35,
-                       help='Lip sync smoothing 0-1 (default: 0.35, higher=smoother)')
+    parser.add_argument('--lip-gain', type=float, default=6.0,
+                       help='Lip sync amplitude gain (default: 6.0, lower=subtler)')
+    parser.add_argument('--lip-max', type=float, default=0.65,
+                       help='Max mouth openness 0-1 (default: 0.65)')
     
     args = parser.parse_args()
     
@@ -629,7 +673,6 @@ def main():
         vmc_port=args.vmc_port,
         lip_gain=args.lip_gain,
         lip_max=args.lip_max,
-        lip_smooth=args.lip_smooth,
     )
     
     # Manual override for speaker device

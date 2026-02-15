@@ -153,7 +153,7 @@ if ($cleaned -gt 0) {
 if (-not $FrontendOnly) {
     Write-Host "`n=== Checking Ollama ===" -ForegroundColor Cyan
     try {
-        Invoke-RestMethod -Uri "http://localhost:11434" -Method Get -TimeoutSec 3 -ErrorAction Stop | Out-Null
+        $null = Invoke-WebRequest -Uri "http://localhost:11434" -Method Get -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop
         Write-Host "  Ollama already running" -ForegroundColor Green
     } catch {
         Write-Host "  Starting Ollama..." -ForegroundColor Yellow
@@ -167,18 +167,19 @@ if (-not $FrontendOnly) {
                 [System.Environment]::SetEnvironmentVariable("OLLAMA_KEEP_ALIVE", $envVars["OLLAMA_KEEP_ALIVE"], "Process")
             }
             Start-Process -FilePath $ollamaPath -ArgumentList "serve" -WindowStyle Hidden
-            # Wait for Ollama to be ready
+            # Wait for Ollama to be ready (up to ~60s)
             $retries = 0
-            while ($retries -lt 10) {
-                Start-Sleep -Seconds 2
+            $maxRetries = 20
+            while ($retries -lt $maxRetries) {
+                Start-Sleep -Seconds 3
                 try {
-                    Invoke-RestMethod -Uri "http://localhost:11434" -Method Get -TimeoutSec 2 -ErrorAction Stop | Out-Null
+                    $null = Invoke-WebRequest -Uri "http://localhost:11434" -Method Get -TimeoutSec 3 -UseBasicParsing -ErrorAction Stop
                     Write-Host "  Ollama started" -ForegroundColor Green
                     break
                 } catch { $retries++ }
             }
-            if ($retries -ge 10) {
-                Write-Host "  WARNING: Ollama didn't respond after 20s" -ForegroundColor Red
+            if ($retries -ge $maxRetries) {
+                Write-Host "  WARNING: Ollama didn't respond after 60s" -ForegroundColor Red
             }
         } else {
             Write-Host "  WARNING: Ollama not found. Install: winget install Ollama.Ollama" -ForegroundColor Red
