@@ -64,33 +64,9 @@ if (-not (Test-Path $RouterScript)) {
     return
 }
 
-if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
-    Write-Host "  ERROR: Python not found in PATH" -ForegroundColor Red
-    return
-}
-
-# Check and install dependencies
-Write-Host "  Checking Python dependencies..." -ForegroundColor Gray
-$missingDeps = @()
-
-$deps = @("sounddevice", "numpy", "pydub")
-foreach ($dep in $deps) {
-    try {
-        python -c "import $dep" -ErrorAction Stop 2>$null
-    } catch {
-        $missingDeps += $dep
-    }
-}
-
-if ($missingDeps.Count -gt 0) {
-    Write-Host "  Installing missing dependencies: $($missingDeps -join ', ')..." -ForegroundColor Yellow
-    pip install $missingDeps --quiet
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "  WARNING: Failed to install some dependencies" -ForegroundColor Yellow
-    }
-}
-
-Write-Host "  ✓ Prerequisites OK" -ForegroundColor Green
+Write-Host "  ✓ Venv found at: $BackendDir\.venv" -ForegroundColor Green
+Write-Host "  ✓ Python executable: $PythonExe" -ForegroundColor Green
+Write-Host "  ✓ Dependencies managed via requirements.txt" -ForegroundColor Green
 
 # ── Start Audio Router ─────────────────────────────────────
 Write-Host "`n=== Starting Audio Router ===" -ForegroundColor Cyan

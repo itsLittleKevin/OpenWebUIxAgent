@@ -1,18 +1,24 @@
 <#
   OpenWebUIxAgent - Launch Script
-  Starts: Ollama -> Backend (FastAPI) -> Frontend (SvelteKit) + GPT-SoVITS (TTS)
+  Starts: Ollama -> Backend (FastAPI) -> Frontend (SvelteKit) + GPT-SoVITS (TTS) + Letta Memory
   All services run in dedicated windows with unified terminal output for easy monitoring.
 
   Usage:
     .\config\launch.ps1                           # Start everything
     .\config\launch.ps1 -Stop                    # Kill all services
-    .\config\launch.ps1 -BackendOnly # Only Ollama + Backend
-    .\config\launch.ps1 -FrontendOnly # Only Frontend (assumes backend running)
+    .\config\launch.ps1 -BackendOnly             # Only Ollama + Backend
+    .\config\launch.ps1 -FrontendOnly            # Only Frontend (assumes backend running)
+    .\config\launch.ps1 -NoLetta                 # Skip Letta Memory Server
+    .\config\launch.ps1 -NoTTS                   # Skip GPT-SoVITS
+    .\config\launch.ps1 -NoAudioRouter           # Skip Audio Router
 #>
 param(
     [switch]$BackendOnly,
     [switch]$FrontendOnly,
-    [switch]$Stop
+    [switch]$Stop,
+    [switch]$NoLetta,
+    [switch]$NoTTS,
+    [switch]$NoAudioRouter
 )
 
 $ErrorActionPreference = "Continue"
@@ -26,11 +32,13 @@ $EnvFile = Join-Path $PSScriptRoot ".env"
 $TitleBackend      = "OpenWebUIxAgent-Backend"
 $TitleFrontend     = "OpenWebUIxAgent-Frontend"
 $TitleGPTSoVITS    = "OpenWebUIxAgent-GPT-SoVITS"
+$TitleAudioRouter  = "OpenWebUIxAgent-AudioRouter"
+$TitleLetta        = "OpenWebUIxAgent-Letta"
 
 # ── Helper: Force-kill processes and release ports ───────────
 function Cleanup-Ports {
     param(
-        [array]$Ports = @(11434, 8080, 5173, 5174, 9880, 8765),
+        [array]$Ports = @(11434, 8080, 5173, 5174, 9880, 8765, 8888),
         [bool]$Verbose = $true
     )
     
@@ -48,7 +56,7 @@ function Cleanup-Ports {
     
     # Kill service windows by title
     Get-Process -ErrorAction SilentlyContinue | Where-Object {
-        $_.MainWindowTitle -in @($TitleBackend, $TitleFrontend, $TitleGPTSoVITS)
+        $_.MainWindowTitle -in @($TitleBackend, $TitleFrontend, $TitleGPTSoVITS, $TitleAudioRouter, $TitleLetta)
     } | ForEach-Object {
         Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
         if ($Verbose) { Write-Host "  Killed window: $($_.MainWindowTitle)" -ForegroundColor Gray }
@@ -277,25 +285,25 @@ if (-not $BackendOnly) {
 }
 
 # ── GPT-SoVITS (TTS Engine) ───────────────────────────
-Write-Host "`n=== Starting GPT-SoVITS (port 9880) ===" -ForegroundColor Cyan
+if (-not $NoTTS) {
+    Write-Host "`n=== Starting GPT-SoVITS (port 9880) ===" -ForegroundColor Cyan
 
-# Kill existing GPT-SoVITS window if any
-Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -eq $TitleGPTSoVITS } |
-    ForEach-Object { Stop-Process -Id $_.Id -Force }
+    # Kill existing GPT-SoVITS window if any
+    Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -eq $TitleGPTSoVITS } |
+        ForEach-Object { Stop-Process -Id $_.Id -Force }
     
-$GPTSoVITSDir = Join-Path $ProjectRoot "vendor\gpt-sovits"
-$VenvActivateTTS = Join-Path $GPTSoVITSDir "venv_tts\Scripts\Activate.ps1"
+    $GPTSoVITSDir = Join-Path $ProjectRoot "vendor\gpt-sovits"
+    $VenvActivateTTS = Join-Path $GPTSoVITSDir "venv_tts\Scripts\Activate.ps1"
 
-if (Test-Path $VenvActivateTTS) {
-    $envBlock = Get-EnvExportBlock
-    $refAudioPath = Join-Path $GPTSoVITSDir "reference_audio\default_reference.wav"
-    $refTextPath = Join-Path $GPTSoVITSDir "reference_audio\default_reference.txt"
-    
-    # Write a temporary launcher script with UTF-8 BOM encoding
-    # (passing Chinese text via Start-Process -Command corrupts encoding)
-    $tempScript = Join-Path $env:TEMP "gpt-sovits-launch-temp.ps1"
-    
-    $sovitsScript = @"
+    if (Test-Path $VenvActivateTTS) {
+        $envBlock = Get-EnvExportBlock
+        $refAudioPath = Join-Path $GPTSoVITSDir "reference_audio\default_reference.wav"
+        $refTextPath = Join-Path $GPTSoVITSDir "reference_audio\default_reference.txt"
+        
+        # Write a temporary launcher script with UTF-8 BOM encoding
+        $tempScript = Join-Path $env:TEMP "gpt-sovits-launch-temp.ps1"
+        
+        $sovitsScript = @"
 `$Host.UI.RawUI.WindowTitle = '$TitleGPTSoVITS'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::InputEncoding = [System.Text.Encoding]::UTF8
@@ -316,49 +324,107 @@ python api_v2.py -a 0.0.0.0 -p 9880
 Write-Host 'GPT-SoVITS exited. Press any key...' -ForegroundColor Red
 `$null = `$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
 "@
-    
-    [System.IO.File]::WriteAllText($tempScript, $sovitsScript, [System.Text.UTF8Encoding]::new($true))
-    
-    Start-Process powershell -ArgumentList "-NoExit", "-File", $tempScript
-    Write-Host "  GPT-SoVITS window opened" -ForegroundColor Green
+        
+        [System.IO.File]::WriteAllText($tempScript, $sovitsScript, [System.Text.UTF8Encoding]::new($true))
+        
+        Start-Process powershell -ArgumentList "-NoExit", "-File", $tempScript
+        Write-Host "  GPT-SoVITS window opened" -ForegroundColor Green
+    } else {
+        Write-Host "  ERROR: GPT-SoVITS venv not found at $VenvActivateTTS" -ForegroundColor Red
+    }
 } else {
-    Write-Host "  ERROR: GPT-SoVITS venv not found at $VenvActivateTTS" -ForegroundColor Red
+    Write-Host "`n=== GPT-SoVITS: Skipped (-NoTTS) ===" -ForegroundColor Gray
 }
 
 # ── Audio Router (for VMC lip sync) ────────────────────────
-Write-Host "`n=== Starting Audio Router (port 8765) ===" -ForegroundColor Cyan
+if (-not $NoAudioRouter) {
+    Write-Host "`n=== Starting Audio Router (port 8765) ===" -ForegroundColor Cyan
 
-# Kill existing Audio Router window if any
-Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -eq "OpenWebUIxAgent-AudioRouter" } |
-    ForEach-Object { Stop-Process -Id $_.Id -Force }
+    # Kill existing Audio Router window if any
+    Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -eq $TitleAudioRouter } |
+        ForEach-Object { Stop-Process -Id $_.Id -Force }
 
-$ServicesDir = Join-Path $ProjectRoot "services"
+    $ServicesDir = Join-Path $ProjectRoot "services"
 
-$routerCmd = @"
-`$Host.UI.RawUI.WindowTitle = 'OpenWebUIxAgent-AudioRouter';
+    $routerCmd = @"
+`$Host.UI.RawUI.WindowTitle = '$TitleAudioRouter';
 Set-Location '$ServicesDir';
 Write-Host 'Audio Router starting on http://localhost:8765 (VMC lip sync)...' -ForegroundColor Green;
 python audio_router.py --serve --port 8765 --vmc-port 39540;
 Write-Host 'Audio Router exited. Press any key...' -ForegroundColor Red; `$null = `$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
 "@
 
-Start-Process powershell -ArgumentList "-NoExit", "-Command", $routerCmd
-Write-Host "  Audio Router window opened (VMC lip sync enabled)" -ForegroundColor Green
+    Start-Process powershell -ArgumentList "-NoExit", "-Command", $routerCmd
+    Write-Host "  Audio Router window opened (VMC lip sync enabled)" -ForegroundColor Green
+} else {
+    Write-Host "`n=== Audio Router: Skipped (-NoAudioRouter) ===" -ForegroundColor Gray
+}
+
+# ── Letta Memory Server ────────────────────────────────────
+if (-not $NoLetta) {
+    Write-Host "`n=== Starting Letta Memory Server (port 8888) ===" -ForegroundColor Cyan
+
+    # Kill existing Letta window if any
+    Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -eq $TitleLetta } |
+        ForEach-Object { Stop-Process -Id $_.Id -Force }
+
+    $ServicesDir = Join-Path $ProjectRoot "services"
+    $LettaVenvPath = Join-Path $ProjectRoot ".venv_letta"
+    if (-Not (Test-Path (Join-Path $LettaVenvPath "Scripts\python.exe"))) {
+        $LettaVenvPath = Join-Path $ServicesDir ".venv_letta"
+    }
+    $LettaVenvActivate = Join-Path $LettaVenvPath "Scripts\Activate.ps1"
+    
+    if (Test-Path $LettaVenvActivate) {
+        $lettaCmd = @"
+`$Host.UI.RawUI.WindowTitle = '$TitleLetta';
+Set-Location '$ServicesDir';
+& '$LettaVenvActivate';
+`$env:OLLAMA_URL = 'http://localhost:11434';
+`$env:LETTA_MODEL = 'huihui_ai/qwen3-abliterated:4b-v2';
+Write-Host 'Letta Memory Server starting on http://localhost:8888 ...' -ForegroundColor Green;
+Write-Host 'Add as Tool Server in Open WebUI: Admin -> Settings -> Tools' -ForegroundColor Yellow;
+python memory_server.py 127.0.0.1 8888;
+Write-Host 'Letta exited. Press any key...' -ForegroundColor Red; `$null = `$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+"@
+
+        Start-Process powershell -ArgumentList "-NoExit", "-Command", $lettaCmd
+        Write-Host "  Letta Memory Server window opened" -ForegroundColor Green
+    } else {
+        Write-Host "  Letta venv not found. Run: cd config; .\letta-launch.ps1 (first time setup)" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "`n=== Letta Memory Server: Skipped (-NoLetta) ===" -ForegroundColor Gray
+}
 
 # ── Summary ────────────────────────────────────────────────
 Write-Host "`n========================================" -ForegroundColor Cyan
 Write-Host "  Ollama:      http://localhost:11434" -ForegroundColor White
 Write-Host "  Backend:     http://localhost:8080" -ForegroundColor White
 Write-Host "  Frontend:    http://localhost:5173" -ForegroundColor White
-Write-Host "  GPT-SoVITS:  http://localhost:9880" -ForegroundColor White
-Write-Host "  AudioRouter: http://localhost:8765 (VMC lip sync)" -ForegroundColor White
+if (-not $NoTTS) {
+    Write-Host "  GPT-SoVITS:  http://localhost:9880" -ForegroundColor White
+}
+if (-not $NoAudioRouter) {
+    Write-Host "  AudioRouter: http://localhost:8765 (VMC lip sync)" -ForegroundColor White
+}
+if (-not $NoLetta) {
+    Write-Host "  Letta:       http://localhost:8888 (Memory/Tools)" -ForegroundColor White
+}
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Services running in dedicated windows for clear logging:" -ForegroundColor Gray
 Write-Host "  • Backend:     API server and audio processing" -ForegroundColor Gray
 Write-Host "  • Frontend:    Web UI" -ForegroundColor Gray
-Write-Host "  • GPT-SoVITS:  Voice synthesis" -ForegroundColor Gray
-Write-Host "  • AudioRouter: VMC/OSC lip sync for VRM" -ForegroundColor Gray
+if (-not $NoTTS) {
+    Write-Host "  • GPT-SoVITS:  Voice synthesis" -ForegroundColor Gray
+}
+if (-not $NoAudioRouter) {
+    Write-Host "  • AudioRouter: VMC/OSC lip sync for VRM" -ForegroundColor Gray
+}
+if (-not $NoLetta) {
+    Write-Host "  • Letta:       Persistent memory for Open WebUI" -ForegroundColor Gray
+}
 Write-Host ""
 Write-Host "To stop all: .\config\launch.ps1 -Stop" -ForegroundColor Gray
 Write-Host "First time? Open http://localhost:5173 and create an admin account." -ForegroundColor Yellow

@@ -1,0 +1,50 @@
+{
+  "agent": {
+    "name": "QwenMemoryAgent",
+    "description": "Letta agent with Qwen3 abliterated model and persistent memory",
+    "version": "1.0.0"
+  },
+  "model": {
+    "type": "ollama",
+    "name": "huihui_ai/qwen3-abliterated:4b-v2",
+    "base_url": "http://localhost:11434",
+    "embedding_model": "nomic-embed-text:latest",
+    "embedding_dim": 1536,
+    "temperature": 0.7,
+    "top_p": 0.9,
+    "context_window": 8192
+  },
+  "memory": {
+    "core": {
+      "type": "text",
+      "max_tokens": 1000,
+      "description": "Facts the agent always remembers"
+    },
+    "recall": {
+      "type": "sqlite",
+      "path": "data/letta/recall.db",
+      "description": "Recent conversation history"
+    },
+    "archival": {
+      "type": "sqlite",
+      "path": "data/letta/archival.db",
+      "description": "Long-term searchable memory (unlimited capacity)"
+    }
+  },
+  "retrieval": {
+    "strategy": "semantic_search",
+    "top_k": 3,
+    "relevance_threshold": 0.5,
+    "auto_recall_on_query": true
+  },
+  "features": {
+    "enable_memory_search": true,
+    "enable_auto_summary": true,
+    "enable_memory_consolidation": true,
+    "consolidation_interval_messages": 100
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "logs/letta.log"
+  }
+}

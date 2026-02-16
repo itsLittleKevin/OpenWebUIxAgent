@@ -11,8 +11,8 @@ dist/
 build/
 .eggs/
 *.egg
-.venv/
-venv/
+.venv*/
+venv*/
 env/
 
 # Node
