@@ -1,0 +1,27 @@
+# =============================================================================
+# ClusterX AI Ollama with Pre-configured Models
+# Custom Ollama image that pulls required models on first start
+# =============================================================================
+FROM ollama/ollama:latest
+
+# Create entrypoint script directory
+RUN mkdir -p /app/scripts
+
+# Copy the model initialization script
+COPY docker/ollama-entrypoint.sh /app/scripts/ollama-entrypoint.sh
+RUN chmod +x /app/scripts/ollama-entrypoint.sh
+
+# Set environment variables
+ENV OLLAMA_HOST=0.0.0.0:11434
+ENV OLLAMA_MODELS=/root/.ollama/models
+
+# Models to pre-pull (space separated)
+ENV OLLAMA_PRELOAD_MODELS="huihui_ai/qwen3-abliterated:4b-v2 nomic-embed-text:latest"
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=30s --start-period=120s --retries=5 \
+    CMD curl -f http://localhost:11434/api/tags || exit 1
+
+EXPOSE 11434
+
+ENTRYPOINT ["/app/scripts/ollama-entrypoint.sh"]

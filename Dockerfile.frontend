@@ -1,14 +1,21 @@
-FROM node:18-alpine AS builder
+# =============================================================================
+# ClusterX AI Frontend Builder
+# Builds the Svelte frontend with all VRM avatar features
+# =============================================================================
+FROM node:20-alpine AS builder
 
 WORKDIR /app
+
+# Install build dependencies
+RUN apk add --no-cache git python3 make g++
 
 # Copy package files
 COPY open-webui/package.json open-webui/package-lock.json ./
 
 # Install dependencies
-RUN npm install --legacy-peer-deps
+RUN npm ci --legacy-peer-deps
 
-# Copy source
+# Copy all source files (including VRM components, translations, etc.)
 COPY open-webui/src ./src
 COPY open-webui/static ./static
 COPY open-webui/svelte.config.js ./
@@ -16,19 +23,36 @@ COPY open-webui/vite.config.ts ./
 COPY open-webui/tsconfig.json ./
 COPY open-webui/tailwind.config.js ./
 COPY open-webui/postcss.config.js ./
+COPY open-webui/i18next-parser.config.ts ./
+COPY open-webui/scripts ./scripts
 
-# Build
+# Copy .env for build-time variables
+COPY open-webui/.env ./.env
+
+# Set build arguments
+ARG WEBUI_NAME="ClusterX AI"
+ENV WEBUI_NAME=${WEBUI_NAME}
+
+# Build the frontend
 RUN npm run build
 
-# Production stage
-FROM node:18-alpine
+# =============================================================================
+# Production stage (standalone dev server, optional)
+# =============================================================================
+FROM node:20-alpine
 
 WORKDIR /app
 
+# Copy built assets
 COPY --from=builder /app/build ./build
 COPY --from=builder /app/package.json ./
 COPY --from=builder /app/node_modules ./node_modules
 
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD wget -q --spider http://localhost:5173 || exit 1
+
 EXPOSE 5173
 
-CMD ["npm", "run", "preview"]
+# Preview mode serves the built frontend
+CMD ["npm", "run", "preview", "--", "--host", "0.0.0.0"]

@@ -1,27 +1,43 @@
+# =============================================================================
+# ClusterX AI Audio Router
+# Routes TTS audio to speakers and analyzes it for VSeeFace VMC/OSC lip sync
+# =============================================================================
 FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies for audio
+# Install system dependencies for audio processing
 RUN apt-get update && apt-get install -y \
     alsa-utils \
     libsndfile1 \
     libportaudio2 \
+    portaudio19-dev \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy services
+# Copy services directory
 COPY services /app/services
 
 WORKDIR /app/services
 
-# Install Python dependencies
+# Install Python dependencies for audio routing
 RUN pip install --no-cache-dir \
     sounddevice \
     pydub \
     aiohttp \
+    aiofiles \
     python-osc \
     numpy \
-    aiofiles
+    scipy
+
+# Environment variables
+ENV AUDIO_HOST=0.0.0.0
+ENV AUDIO_PORT=8765
+ENV VMC_PORT=39540
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8765/health')" || exit 1
 
 EXPOSE 8765
 

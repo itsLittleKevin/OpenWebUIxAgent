@@ -1,25 +1,67 @@
-FROM python:3.11-slim
+# =============================================================================
+# ClusterX AI Backend
+# Full production build with all dependencies
+# =============================================================================
+FROM python:3.11-slim AS builder
 
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies for building
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
     git \
+    libpq-dev \
+    libffi-dev \
+    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy backend
-COPY open-webui/backend /app/backend
-COPY open-webui/backend/requirements.txt /app/
+# Copy requirements first for layer caching
+COPY open-webui/backend/requirements.txt /app/requirements.txt
 
 # Install Python dependencies
-RUN pip install --no-cache-dir -r /app/requirements.txt
+RUN pip install --no-cache-dir --user -r /app/requirements.txt
+
+# =============================================================================
+# Production stage
+# =============================================================================
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    libpq5 \
+    libffi8 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy installed packages from builder
+COPY --from=builder /root/.local /root/.local
+ENV PATH=/root/.local/bin:$PATH
+
+# Copy backend source
+COPY open-webui/backend /app/backend
+
+# Copy .env file for configuration
+COPY open-webui/.env /app/backend/.env
+
+# Copy built frontend (served by backend in production)
+COPY open-webui/build /app/backend/build
 
 WORKDIR /app/backend
 
-# Create data directories
-RUN mkdir -p data uploads vector_db cache
+# Create necessary directories
+RUN mkdir -p data uploads vector_db cache logs
+
+# Set environment variables
+ENV DOCKER=true
+ENV PORT=8080
+ENV HOST=0.0.0.0
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
 
 EXPOSE 8080
 

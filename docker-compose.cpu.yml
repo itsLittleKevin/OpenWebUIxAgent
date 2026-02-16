@@ -1,12 +1,12 @@
 # =============================================================================
-# ClusterX AI - Complete Docker Compose Stack
-# All services including VRM avatar support, TTS, memory, and AI models
+# ClusterX AI - CPU-Only Docker Compose Stack
+# For systems without NVIDIA GPU
 # =============================================================================
 version: '3.8'
 
 services:
   # ===========================================================================
-  # Ollama - Local LLM Server with Pre-loaded Models
+  # Ollama - Local LLM Server (CPU mode)
   # ===========================================================================
   ollama:
     build:
@@ -20,23 +20,16 @@ services:
     environment:
       - OLLAMA_HOST=0.0.0.0:11434
       - OLLAMA_PRELOAD_MODELS=huihui_ai/qwen3-abliterated:4b-v2 nomic-embed-text:latest
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 120s
+      start_period: 180s  # Longer for CPU model loading
 
   # ===========================================================================
-  # Backend - Open WebUI API Server (serves frontend in production)
+  # Backend - Open WebUI API Server
   # ===========================================================================
   backend:
     build:
@@ -72,56 +65,7 @@ services:
       start_period: 60s
 
   # ===========================================================================
-  # GPT-SoVITS - Text-to-Speech Engine
-  # ===========================================================================
-  gpt-sovits:
-    build:
-      context: ./vendor/GPT-SoVITS
-      dockerfile: Dockerfile.sovits
-    container_name: clusterx-tts
-    ports:
-      - "9880:9880"
-    volumes:
-      - sovits_models:/workspace/GPT-SoVITS/models
-      - sovits_outputs:/workspace/GPT-SoVITS/outputs
-    environment:
-      - CUDA_VISIBLE_DEVICES=0
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9880/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-
-  # ===========================================================================
-  # Audio Router - TTS Audio to VMC Lip Sync Bridge
-  # ===========================================================================
-  audio-router:
-    build:
-      context: .
-      dockerfile: Dockerfile.audio-router
-    container_name: clusterx-audio
-    ports:
-      - "8765:8765"
-    depends_on:
-      - gpt-sovits
-    environment:
-      - AUDIO_HOST=0.0.0.0
-      - AUDIO_PORT=8765
-      - VMC_PORT=39540
-      - TTS_URL=http://gpt-sovits:9880
-    restart: unless-stopped
-
-  # ===========================================================================
-  # Letta Memory Server - Persistent Conversation Memory
+  # Letta Memory Server
   # ===========================================================================
   letta:
     build:
@@ -151,27 +95,12 @@ services:
 # Persistent Volumes
 # =============================================================================
 volumes:
-  # Ollama models storage (~10GB+ for all models)
   ollama_data:
     driver: local
-  
-  # Open WebUI database and settings
   webui_data:
     driver: local
-  
-  # User uploads (VRM models, files, etc.)
   webui_uploads:
     driver: local
-  
-  # GPT-SoVITS models
-  sovits_models:
-    driver: local
-  
-  # GPT-SoVITS generated audio
-  sovits_outputs:
-    driver: local
-  
-  # Letta memory database
   letta_data:
     driver: local
 

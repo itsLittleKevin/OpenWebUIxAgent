@@ -1,28 +1,58 @@
+# =============================================================================
+# ClusterX AI Docker Build Ignore
+# =============================================================================
+
+# Git
 .git
 .github
-node_modules
+.gitignore
+.gitmodules
+
+# Virtual environments
 .venv
 venv
-.venv_letta
+.venv_*
+**/venv/
+**/.venv/
+
+# Python cache
 __pycache__
 *.pyc
+*.pyo
 .pytest_cache
-.env
-.env.local
-build/
+
+# Node modules (we install fresh in container)
+node_modules
+**/node_modules/
+
+# Build artifacts (except open-webui/build which we need)
 dist/
+
+# OS files
 .DS_Store
+Thumbs.db
+
+# Logs (recreated at runtime)
 logs/
 *.log
+recent.log
+
+# Local config files (we use Docker env vars instead)
+.env.local
+
+# Database files (recreated at runtime)
 data/letta/*.db
-open-webui/build/
-.gitignore
-.editorconfig
-README.md
-*.md
+
+# Documentation (not needed for runtime)
 cypress/
-docs/
 test/
 .pre-commit-config.yaml
 .eslintrc
 .prettierrc
+.editorconfig
+
+# Exclude these from docs but keep DOCKER_DEPLOYMENT.md
+PHASE*.md
+SETUP*.md
+SYSTEM_PROMPT*.md
+plan.prompt.md

@@ -1,16 +1,39 @@
+# =============================================================================
+# ClusterX AI Letta Memory Server
+# Persistent conversation memory with semantic search and Ollama integration
+# =============================================================================
 FROM python:3.11-slim
 
 WORKDIR /app
 
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy services and requirements
 COPY services /app/services
-COPY services/requirements_letta.txt /app/
+COPY services/requirements_letta.txt /app/requirements_letta.txt
+COPY config/letta_config.json /app/config/letta_config.json
 
 WORKDIR /app/services
 
+# Install Python dependencies
 RUN pip install --no-cache-dir -r /app/requirements_letta.txt
 
-RUN mkdir -p /app/data
+# Create data directories
+RUN mkdir -p /app/data/letta
 
+# Environment variables
+ENV OLLAMA_URL=http://ollama:11434
+ENV LETTA_MODEL=huihui_ai/qwen3-abliterated:4b-v2
+ENV DATA_DIR=/app/data/letta
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8888/health || exit 1
+
+# Expose memory server port
 EXPOSE 8888
 
 CMD ["python", "memory_server.py", "0.0.0.0", "8888"]
