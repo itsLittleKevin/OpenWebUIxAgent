@@ -1,6 +1,48 @@
 # VSeeFace Audio Configuration Guide
 
 ## Overview
+
+There are **two modes** for displaying VRM avatars in Open WebUI:
+
+### Mode 1: Native VRM (Recommended for Distribution)
+Renders VRM models directly in the browser using Three.js. No external software required.
+- **No VSeeFace needed**
+- **No virtual camera needed**
+- **No green screen/chroma key needed**
+- Works on any platform (Windows, Mac, Linux)
+- Automatic lip sync from TTS audio
+- Optional webcam-based face tracking for head/eye movement
+
+### Mode 2: Camera (VSeeFace)
+Captures video from VSeeFace via virtual camera with chroma key processing.
+- Requires VSeeFace installation
+- Requires VB-Audio Virtual Cable for lip sync
+- More complex setup but supports all VSeeFace features
+
+---
+
+## Native VRM Mode Setup (Simple)
+
+1. Open the VRM Avatar overlay (click the avatar icon in the chat interface)
+2. Click the **Settings** (gear) icon
+3. Select **"Native VRM"** mode at the top
+4. Click **"Upload VRM File"** and select your `.vrm` model
+5. (Optional) Enable **Face Tracking** to use your webcam for head/eye movement
+6. (Optional) **Record Movement** to create animation presets
+
+### Features in Native Mode:
+- **Lip Sync**: Automatic phoneme-based lip sync (A, I, U, E, O) from TTS audio
+- **Face Tracking**: Use MediaPipe to track your face and control the avatar
+- **Movement Recording**: Record head movements to create reusable animation presets
+- **Expression Control**: Automatic emotion detection from LLM responses
+
+### VRM File Persistence
+Your VRM model is automatically saved in the browser's IndexedDB. It will be restored when you reload the page.
+
+---
+
+## Camera Mode Setup (VSeeFace)
+
 VSeeFace will read audio from the **VB-Audio Virtual Cable (CABLE Input)** to synchronize avatar mouth movements with TTS audio output.
 
 ## Architecture
