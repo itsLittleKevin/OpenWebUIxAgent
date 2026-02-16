@@ -1,0 +1,16 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY services /app/services
+COPY services/requirements_letta.txt /app/
+
+WORKDIR /app/services
+
+RUN pip install --no-cache-dir -r /app/requirements_letta.txt
+
+RUN mkdir -p /app/data
+
+EXPOSE 8888
+
+CMD ["python", "memory_server.py", "0.0.0.0", "8888"]

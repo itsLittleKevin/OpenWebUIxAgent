@@ -1,0 +1,97 @@
+version: '3.8'
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0:11434
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: open-webui-backend
+    ports:
+      - "8080:8080"
+    depends_on:
+      - ollama
+    environment:
+      - CORS_ALLOW_ORIGIN=http://localhost:5173;http://localhost:8080
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - DATABASE_URL=sqlite:///./data/webui.db
+    volumes:
+      - webui_data:/app/backend/data
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./open-webui
+      dockerfile: ../Dockerfile.frontend
+    container_name: open-webui-frontend
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    environment:
+      - VITE_API_BASE_URL=http://localhost:8080
+    restart: unless-stopped
+
+  gpt-sovits:
+    build:
+      context: ./vendor/GPT-SoVITS
+      dockerfile: Dockerfile.sovits
+    container_name: gpt-sovits
+    ports:
+      - "9880:9880"
+    volumes:
+      - sovits_models:/workspace/models
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    restart: unless-stopped
+
+  audio-router:
+    build:
+      context: ./services
+      dockerfile: ../Dockerfile.audio-router
+    container_name: audio-router
+    ports:
+      - "8765:8765"
+    depends_on:
+      - gpt-sovits
+    environment:
+      - AUDIO_HOST=0.0.0.0
+      - AUDIO_PORT=8765
+      - VMC_PORT=39540
+    restart: unless-stopped
+
+  letta:
+    build:
+      context: ./services
+      dockerfile: ../Dockerfile.letta
+    container_name: letta-memory
+    ports:
+      - "8888:8888"
+    depends_on:
+      - ollama
+    environment:
+      - OLLAMA_URL=http://ollama:11434
+      - LETTA_MODEL=huihui_ai/qwen3-abliterated:4b-v2
+    volumes:
+      - letta_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
+  webui_data:
+  sovits_models:
+  letta_data:
+
+networks:
+  default:
+    driver: bridge
