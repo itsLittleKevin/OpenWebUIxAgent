@@ -266,6 +266,10 @@ class AudioRouter:
         self.vmc = VMCLipSync(port=vmc_port, gain=lip_gain,
                               max_open=lip_max)
         
+        # Cancellation event for stopping playback
+        import threading
+        self.playback_cancel = threading.Event()
+        
         if HAS_SOUNDDEVICE:
             self._detect_devices(speaker_device_name)
     
@@ -396,6 +400,9 @@ class AudioRouter:
                 log.error("pydub and sounddevice required")
                 return False
 
+            # Clear any previous cancellation flag
+            self.playback_cancel.clear()
+
             audio_seg = AudioSegment.from_file(io.BytesIO(audio_data), format=format.lower())
             samples = np.array(audio_seg.get_array_of_samples()).astype(np.float32)
             if audio_seg.channels == 2:
@@ -420,6 +427,13 @@ class AudioRouter:
 
             def audio_callback(outdata, frames, time_info, status):
                 """Called by sounddevice for each output chunk — fills speaker buffer."""
+                # Check for cancellation signal
+                if self.playback_cancel.is_set():
+                    outdata[:] = 0
+                    current_rms[0] = 0.0
+                    playback_done.set()
+                    raise sd.CallbackStop()
+
                 start = write_pos[0]
                 end = start + frames
 
@@ -454,10 +468,13 @@ class AudioRouter:
                 """Poll current_rms at ~30 fps and send VMC blend shapes."""
                 interval = 1.0 / self.vmc.FPS
                 while not playback_done.is_set():
+                    # Check for cancellation and exit immediately
+                    if self.playback_cancel.is_set():
+                        break
                     rms = current_rms[0]
                     self.vmc.rms_to_blend_shapes(rms)
                     playback_done.wait(timeout=interval)
-                # Fade mouth closed
+                # Fade mouth closed (handles both normal completion and cancellation)
                 self.vmc._fade_close()
                 log.info("VMC lip sync complete")
 
@@ -484,6 +501,12 @@ class AudioRouter:
             log.error(f"Audio playback failed: {e}")
             self.vmc.close_mouth()
             return False
+
+    def stop_playback(self):
+        """Immediately stop audio playback and close VRM mouth."""
+        log.info("Stopping audio playback and closing mouth")
+        self.playback_cancel.set()
+        self.vmc.close_mouth()
 
 
 # ── API Server (optional HTTP interface) ────────────────────────────────
@@ -581,10 +604,16 @@ async def start_api_server(router: AudioRouter, port: int = 8765):
         log.info(f"Cleared {cleared} items from playback queue")
         return web.json_response({'success': True, 'cleared': cleared})
 
+    async def handle_stop(request):
+        """Handle POST /stop - immediately stop current playback and close mouth."""
+        router.stop_playback()
+        return web.json_response({'success': True, 'message': 'Playback stopped'})
+
     app = web.Application()
     app.router.add_post('/play', handle_play)
     app.router.add_post('/play-bytes', handle_play_bytes)
     app.router.add_post('/clear', handle_clear)
+    app.router.add_post('/stop', handle_stop)
     app.router.add_get('/test', handle_test)
     app.router.add_get('/status', handle_status)
     
