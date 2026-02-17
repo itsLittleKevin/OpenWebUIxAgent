@@ -15,13 +15,14 @@ OLLAMA_PID=$!
 
 # Wait for Ollama to be ready
 echo "Waiting for Ollama to start..."
-MAX_RETRIES=30
+MAX_RETRIES=60
 RETRY_COUNT=0
-while ! curl -s http://localhost:11434/api/tags > /dev/null 2>&1; do
+while ! curl -f -s --max-time 5 http://127.0.0.1:11434/api/tags > /dev/null 2>&1; do
     sleep 2
     RETRY_COUNT=$((RETRY_COUNT + 1))
     if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
         echo "ERROR: Ollama failed to start within timeout"
+        kill $OLLAMA_PID 2>/dev/null || true
         exit 1
     fi
     echo "  Attempt $RETRY_COUNT/$MAX_RETRIES..."

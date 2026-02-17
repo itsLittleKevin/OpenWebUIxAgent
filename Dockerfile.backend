@@ -22,6 +22,9 @@ COPY open-webui/backend/requirements.txt /app/requirements.txt
 # Install Python dependencies
 RUN pip install --no-cache-dir --user -r /app/requirements.txt
 
+# Install additional custom dependencies not in upstream requirements
+RUN pip install --no-cache-dir --user python-osc
+
 # =============================================================================
 # Production stage
 # =============================================================================
@@ -32,6 +35,7 @@ WORKDIR /app
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \
     curl \
+    ffmpeg \
     libpq5 \
     libffi8 \
     && rm -rf /var/lib/apt/lists/*
@@ -43,11 +47,14 @@ ENV PATH=/root/.local/bin:$PATH
 # Copy backend source
 COPY open-webui/backend /app/backend
 
+# Copy CHANGELOG.md into the open_webui package (code expects it there)
+COPY open-webui/CHANGELOG.md /app/backend/open_webui/CHANGELOG.md
+
 # Copy .env file for configuration
 COPY open-webui/.env /app/backend/.env
 
-# Copy built frontend (served by backend in production)
-COPY open-webui/build /app/backend/build
+# Copy built frontend to where Open WebUI expects it (/app/build)
+COPY open-webui/build /app/build
 
 WORKDIR /app/backend
 

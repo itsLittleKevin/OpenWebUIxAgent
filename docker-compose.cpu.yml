@@ -2,8 +2,6 @@
 # ClusterX AI - CPU-Only Docker Compose Stack
 # For systems without NVIDIA GPU
 # =============================================================================
-version: '3.8'
-
 services:
   # ===========================================================================
   # Ollama - Local LLM Server (CPU mode)

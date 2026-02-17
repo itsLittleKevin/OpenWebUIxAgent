@@ -37,8 +37,8 @@ ENV VMC_PORT=39540
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8765/health')" || exit 1
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8765/status')" || exit 1
 
 EXPOSE 8765
 
-CMD ["python", "audio_router.py", "--serve", "--host", "0.0.0.0", "--port", "8765"]
+CMD ["python", "audio_router.py", "--serve", "--port", "8765"]

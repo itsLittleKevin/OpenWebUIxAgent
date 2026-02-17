@@ -4,6 +4,9 @@
 # =============================================================================
 FROM ollama/ollama:latest
 
+# Install curl for health checks and the entrypoint script
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+
 # Create entrypoint script directory
 RUN mkdir -p /app/scripts
 
@@ -20,7 +23,7 @@ ENV OLLAMA_PRELOAD_MODELS="huihui_ai/qwen3-abliterated:4b-v2 nomic-embed-text:la
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=30s --start-period=120s --retries=5 \
-    CMD curl -f http://localhost:11434/api/tags || exit 1
+    CMD curl -f http://127.0.0.1:11434/api/tags || exit 1
 
 EXPOSE 11434
 
